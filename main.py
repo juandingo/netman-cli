@@ -1,0 +1,799 @@
+import sys
+import serial
+import os
+import re
+import time
+import logging
+from collections import Counter
+from openpyxl import load_workbook, Workbook
+from serial_config import (
+    load_config, save_config, list_available_ports,
+    auto_detect_port, DEFAULT_CONFIG
+)
+
+config = load_config()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+
+def auto_detect_on_startup():
+    global config
+    port, ports_list, error = auto_detect_port()
+    if port:
+        config["port"] = port
+        logger.info(f"Puerto detectado automáticamente: {port}")
+        print(f"Puerto detectado automáticamente: {port}")
+        save_config(config)
+    elif error:
+        print(f"\n{error}")
+    elif ports_list:
+        print("\nMúltiples puertos disponibles. Use la opción 5 para configurar.")
+        for i, p in enumerate(ports_list, 1):
+            print(f"  {i}. {p.device} - {p.description}")
+
+
+def open_serial():
+    if not config.get("port"):
+        print("ERROR: No hay puerto seleccionado. Configure primero en opción 5.")
+        return None
+    try:
+        ser = serial.Serial(
+            port=config["port"],
+            baudrate=config["baudrate"],
+            bytesize=config["bits"],
+            parity=config["parity"][0].upper() if config["parity"] else 'N',
+            stopbits=config["stopbits"],
+            timeout=config["timeout"],
+            rtscts=False,
+            dsrdtr=False
+        )
+        return ser
+    except serial.SerialException as e:
+        print(f"ERROR al conectar: {e}")
+        if "PermissionError" in str(e) or "denied" in str(e).lower() or "13" in str(e):
+            print()
+            print("  ⚠︎  Windows: no se puede acceder al puerto", config["port"])
+            print("  ─────────────────────────────────────────────")
+            print("  1. Cierre otros programas que usen el puerto:")
+            print("     PuTTY, Docklight, MobaXterm, HyperTerminal, etc.")
+            print()
+            print("  2. Abra el Administrador de Dispositivos y revise:")
+            print("     - Que COM1 aparezca en 'Puertos (COM y LPT)'")
+            print("     - Que no tenga un triángulo amarillo (error de driver)")
+            print()
+            print("  3. Ejecute esta terminal como ADMINISTRADOR:")
+            print("     Clic derecho en CMD/PowerShell → 'Ejecutar como administrador'")
+            print()
+            print("  4. Para listar los puertos disponibles use la opción 5 → 1")
+        return None
+
+
+def send_command(ser, command, wait=0.5, total_timeout=15):
+    ser.write((command + '\r\n').encode())
+    output = b''
+    last_data_time = None
+    original_timeout = ser.timeout
+    ser.timeout = 0.2
+    deadline = time.time() + total_timeout
+    try:
+        while time.time() < deadline:
+            data = ser.read(ser.in_waiting or 1)
+            if data:
+                output += data
+                last_data_time = time.time()
+            else:
+                if last_data_time is not None and time.time() - last_data_time > wait:
+                    break
+    except:
+        pass
+    ser.timeout = original_timeout
+    return output.decode(errors='replace')
+
+
+def flush_serial(ser):
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+
+
+def wake_up(ser):
+    ser.write(b'\r')
+    time.sleep(0.5)
+    return read_all(ser)
+
+
+def read_all(ser, timeout=2):
+    output = b''
+    last_data_time = None
+    original_timeout = ser.timeout
+    ser.timeout = 0.2
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline:
+            data = ser.read(ser.in_waiting or 1)
+            if data:
+                output += data
+                last_data_time = time.time()
+            else:
+                if last_data_time is not None and time.time() - last_data_time > 0.3:
+                    break
+    except:
+        pass
+    ser.timeout = original_timeout
+    return output.decode(errors='replace')
+
+
+def show_main_menu():
+    print("\n" + "=" * 40)
+    print("          MENÚ PRINCIPAL")
+    print("=" * 40)
+    print("1. Conectar al dispositivo")
+    print("2. Enviar comando")
+    print("3. Ver configuración actual")
+    print("4. Información del dispositivo")
+    print("5. Configuración serial")
+    print("6. Exportar datos a Excel")
+    print("7. Reiniciar a fábrica")
+    print("8. Testear puertos del switch")
+    print("0. Salir")
+    print("=" * 40)
+
+
+def cmd_connect():
+    ser = open_serial()
+    if ser:
+        logger.info(f"Conectado a {config['port']} a {config['baudrate']} baud.")
+        print(f"Conectado a {config['port']} a {config['baudrate']} baud.")
+        ser.write(b'\r')
+        time.sleep(1)
+        respuesta = read_all(ser)
+        if respuesta:
+            for linea in respuesta.strip().split('\n'):
+                linea = linea.strip()
+                if linea:
+                    print(f"  {linea}")
+        else:
+            print("AVISO: No se recibió respuesta del dispositivo.")
+            print("  Verifique que el switch esté encendido y conectado al puerto serial.")
+        ser.close()
+
+
+def cmd_send_command():
+    ser = open_serial()
+    if not ser:
+        return
+    logger.info("Iniciando modo comando interactivo.")
+    flush_serial(ser)
+    init = wake_up(ser)
+    if init:
+        for l in init.strip().split('\n'):
+            l = l.strip()
+            if l:
+                print(f"  {l}")
+    else:
+        print("AVISO: No se recibió respuesta del dispositivo.")
+    print("\nModo comando interactivo. Escribe 'exit' para volver.\n")
+    try:
+        while True:
+            cmd = input("Comando> ").strip()
+            if cmd.lower() == 'exit':
+                break
+            if cmd:
+                output = send_command(ser, cmd, wait=1)
+                if output.strip():
+                    print(output)
+                else:
+                    print("  (sin respuesta)")
+    except KeyboardInterrupt:
+        print("\nInterrumpido.")
+    finally:
+        ser.close()
+
+
+def cmd_show_config():
+    ser = open_serial()
+    if not ser:
+        return
+    flush_serial(ser)
+    wake_up(ser)
+    output = send_command(ser, "enable")
+    if '#' not in output:
+        logger.warning("No se detecta modo privilegiado (enable). La configuración puede estar incompleta.")
+        print("  AVISO: No se detecta modo privilegiado. Verifique que no haya password de enable.")
+    send_command(ser, "terminal length 0")
+    logger.info("Obteniendo running-config...")
+    print("Obteniendo running-config...")
+    output = send_command(ser, "show running-config", total_timeout=30)
+    if output.strip():
+        print(output)
+    else:
+        print("  No se recibió respuesta. Verifique la conexión con el switch.")
+        print("  Asegúrese de estar en modo privilegiado (enable).")
+    ser.close()
+
+
+def cmd_device_info():
+    ser = open_serial()
+    if not ser:
+        return
+    flush_serial(ser)
+    wake_up(ser)
+    send_command(ser, "enable")
+    send_command(ser, "terminal length 0")
+    logger.info("Obteniendo información del dispositivo...")
+    print("Obteniendo información del dispositivo...")
+    output = send_command(ser, "show version", total_timeout=15)
+    if output.strip():
+        print(output)
+    else:
+        print("  No se recibió respuesta. Verifique la conexión con el switch.")
+        print("  Asegúrese de que el switch esté encendido y conectado al puerto serial.")
+    ser.close()
+
+
+def cmd_factory_reset():
+    ser = open_serial()
+    if not ser:
+        return
+
+    logger.info("Iniciando reinicio a fábrica.")
+    try:
+        flush_serial(ser)
+        initial = wake_up(ser)
+
+        if not initial.strip():
+            print("AVISO: No se detecta respuesta del switch.")
+            cont = input("  ¿Continuar de todas formas? (s/n): ").strip().lower()
+            if cont != 's':
+                print("Operación cancelada.")
+                ser.close()
+                return
+
+        send_command(ser, "enable")
+        time.sleep(0.5)
+        read_all(ser)
+
+        print("\n" + "=" * 55)
+        print("  ARCHIVOS EN LA FLASH DEL SWITCH")
+        print("=" * 55)
+        dir_out = send_command(ser, "dir flash:", wait=2)
+        print(dir_out)
+
+        print("=" * 55)
+        print("  Archivos a eliminar (separados por coma):")
+        print("  Ejemplo: vlan.dat, config.text")
+        print("  'todo' para borrar todo (menos IOS)")
+        print("  0 para saltar este paso")
+        print("=" * 55)
+        elegir = input("  ¿Qué archivos borrar?: ").strip().lower()
+
+        borrar_lista = []
+        if elegir == 'todo':
+            archivos = re.findall(r'^\s*(\d+)\s+.+?([^\s]+\.\w+)', dir_out, re.MULTILINE)
+            borrar_lista = [a for _, a in archivos if not a.endswith('.bin')]
+        elif elegir != '0':
+            borrar_lista = [a.strip() for a in elegir.split(',') if a.strip()]
+
+        if borrar_lista:
+            print(f"\n  Archivos seleccionados para borrar: {', '.join(borrar_lista)}")
+            confirm = input("  ¿Confirmar borrado? (s/n): ").strip().lower()
+            if confirm == 's':
+                for archivo in borrar_lista:
+                    print(f"  Borrando {archivo}...")
+                    send_command(ser, f"delete flash:{archivo}")
+                    time.sleep(0.5)
+                    ser.write(b'\n')
+                    time.sleep(0.5)
+                    read_all(ser)
+                print("  OK")
+            else:
+                print("  Borrado cancelado.")
+
+        print("\n  Borrando startup-config...")
+        send_command(ser, "write erase")
+        time.sleep(1)
+        ser.write(b'\n')
+        time.sleep(1)
+        read_all(ser)
+        print("  OK")
+
+        reiniciar = input("\n  ¿Reiniciar el switch ahora? (s/n): ").strip().lower()
+        if reiniciar == 's':
+            print("  Reiniciando...")
+            send_command(ser, "reload")
+            time.sleep(2)
+            read_all(ser)
+            ser.write(b'yes\n')
+            time.sleep(1)
+            read_all(ser)
+            print("\n" + "!" * 50)
+            print("   REINICIO COMPLETADO")
+            print("   El switch se está reiniciando con valores de fábrica.")
+            print("   Espere 2-3 minutos antes de intentar conectarse.")
+            print("!" * 50)
+        else:
+            print("  No se reinició. Puede hacerlo manualmente con 'reload'.")
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+    finally:
+        ser.close()
+
+
+def cmd_export_excel():
+    ser = open_serial()
+    if not ser:
+        return
+
+    try:
+        flush_serial(ser)
+        wake_up(ser)
+
+        logger.info("Conectando al switch para exportar datos...")
+        print("Conectando al switch para obtener datos...")
+        send_command(ser, "enable")
+        send_command(ser, "terminal length 0")
+
+        print("  Leyendo show version...")
+        version_out = send_command(ser, "show version", total_timeout=15)
+        if version_out.strip():
+            print("  OK")
+        else:
+            print("  AVISO: No se recibió respuesta. Verifique la conexión.")
+
+        print("  Leyendo show running-config...")
+        running_out = send_command(ser, "show running-config", total_timeout=30)
+        if running_out.strip():
+            print("  OK")
+        else:
+            print("  AVISO: No se recibió respuesta.")
+
+        print("  Leyendo show vlan brief...")
+        vlan_out = send_command(ser, "show vlan brief", total_timeout=10)
+        if vlan_out.strip():
+            print("  OK")
+        else:
+            print("  AVISO: No se recibió respuesta.")
+
+        if not version_out.strip() and not running_out.strip():
+            print("\nERROR: No se pudo obtener datos del switch. Cancelando exportación.")
+            return
+
+        data = parse_device_data(version_out, running_out, vlan_out)
+
+        filename = input("\nNombre archivo Excel (default: dispositivos.xlsx): ").strip()
+        if not filename:
+            filename = "dispositivos.xlsx"
+        if not filename.endswith('.xlsx'):
+            filename += '.xlsx'
+
+        append_excel_row(data, filename)
+        logger.info(f"Datos exportados a: {filename}")
+        print(f"\n  Datos exportados a: {filename}")
+        print("  Resumen de datos extraídos:")
+        for k, v in data.items():
+            if v:
+                print(f"    {k}: {v}")
+            else:
+                print(f"    {k}: (no detectado)")
+
+    except Exception as e:
+        logger.error(f"Error al obtener datos: {e}")
+        print(f"ERROR al obtener datos: {e}")
+    finally:
+        ser.close()
+
+
+def detect_brand(version_text):
+    if re.search(r'cisco', version_text, re.IGNORECASE):
+        return "Cisco"
+    if re.search(r'Hewlett.?Packard|HP\s+ProCurve|ProCurve', version_text, re.IGNORECASE):
+        return "HP"
+    if re.search(r'Dell.*(?:PowerConnect|Force10|Networking)', version_text, re.IGNORECASE):
+        return "Dell"
+    if re.search(r'Juniper', version_text, re.IGNORECASE):
+        return "Juniper"
+    if re.search(r'Extreme', version_text, re.IGNORECASE):
+        return "Extreme"
+    if re.search(r'Brocade', version_text, re.IGNORECASE):
+        return "Brocade"
+    if re.search(r'MikroTik|RouterOS', version_text, re.IGNORECASE):
+        return "MikroTik"
+    if re.search(r'Netgear', version_text, re.IGNORECASE):
+        return "Netgear"
+    if re.search(r'TP.?Link', version_text, re.IGNORECASE):
+        return "TP-Link"
+    return "Switch genérico"
+
+
+def parse_interfaces(version_text):
+    interfaces = []
+    for m in re.finditer(r'(\d+)\s+(.+?)\s+[Ii]nterface', version_text):
+        count = m.group(1)
+        tipo = m.group(2).strip().rstrip('/,;')
+        if tipo:
+            interfaces.append(f"{count} {tipo}")
+    if not interfaces:
+        for m in re.finditer(r'(\d+)\s+(FastEthernet|Gigabit Ethernet|GigabitEthernet|TenGigabitEthernet|Ports)', version_text, re.IGNORECASE):
+            count, tipo = m.group(1), m.group(2)
+            if tipo:
+                interfaces.append(f"{count} {tipo}")
+    return ", ".join(interfaces) if interfaces else ""
+
+
+def parse_device_data(version_text, running_text, vlan_text=""):
+    data = {
+        "Tipo": "Switch",
+        "Marca": detect_brand(version_text),
+        "Modelo": "",
+        "Revisión": "",
+        "Firmware": "",
+        "Número de serie": "",
+        "Hostname": "",
+        "MAC": "",
+        "IP-gestión": "",
+        "Licencia": "",
+        "Interfaces": ""
+    }
+
+    # Modelo
+    m = re.search(r'Model\s+number\s*[=:]\s*(\S+)', version_text, re.IGNORECASE)
+    if not m:
+        m = re.search(r'((?:WS-C|CGS|IE-\d+|SG\d+|CSR)\S+)', version_text)
+    if not m:
+        m = re.search(r'cisco\s+(\S+)\s+\(', version_text, re.IGNORECASE)
+    if not m:
+        m = re.search(r'[Pp]roduct\s+(?:name|number|model)\s*[=:]\s*(\S+)', version_text, re.IGNORECASE)
+    if not m:
+        m = re.search(r'[Mm]odel\s*(?:name|number|No\.?)?\s*[=:.]?\s*(\S+)', version_text)
+    if m:
+        data["Modelo"] = m.group(1).strip().rstrip(',')
+
+    # Revisión del modelo
+    m = re.search(r'Model\s+revision\s+number\s*[=:]\s*(\S+)', version_text, re.IGNORECASE)
+    if m:
+        data["Revisión"] = m.group(1).strip()
+    else:
+        m = re.search(r'[Mm]odel\s+rev\S*\s*[=:.]?\s*(\S+)', version_text)
+        if m:
+            data["Revisión"] = m.group(1).strip()
+
+    # Firmware
+    m = re.search(r'Version\s+(\S[\w().]*)', version_text)
+    if not m:
+        m = re.search(r'[Ff]irmware\s*(?:version|rev)?\s*[=:]\s*(\S+)', version_text)
+    if not m:
+        m = re.search(r'Software\s+(\d+\.\d+\(?\d*\)?[^,\s]*)', version_text)
+    if m:
+        data["Firmware"] = m.group(1).strip().rstrip(',')
+
+    # Número de serie
+    m = re.search(r'^Syste?m?\s+[Ss]erial\s+[Nn]umber\s*[=:]\s*(\S+)', version_text, re.MULTILINE)
+    if not m:
+        m = re.search(r'[Pp]rocessor\s+board\s+ID\s+(\S+)', version_text)
+    if not m:
+        m = re.search(r'[Bb]oard\s+ID\s+(\S+)', version_text)
+    if m:
+        data["Número de serie"] = m.group(1).strip()
+    if not data["Número de serie"] and 'Motherboard' in version_text:
+        for line in version_text.split('\n'):
+            if 'serial number' in line.lower() and 'motherboard' not in line.lower() and 'power supply' not in line.lower():
+                parts = line.split(':')
+                if len(parts) >= 2:
+                    data["Número de serie"] = parts[-1].strip()
+                    break
+    if not data["Número de serie"]:
+        m = re.search(r'[Ss][Nn][:=]\s*(\S+)', version_text)
+        if m:
+            data["Número de serie"] = m.group(1).strip()
+
+    # MAC
+    m = re.search(r'(?:Base\s+)?(?:ethernet\s+)?MAC\s+(?:Address|Router)\s*[=:]\s*(\S+)', version_text, re.IGNORECASE)
+    if not m:
+        m = re.search(r'([0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4})', version_text)
+    if not m:
+        m = re.search(r'([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})', version_text)
+    if m:
+        data["MAC"] = m.group(1).strip()
+
+    # Hostname
+    m = re.search(r'hostname\s+(\S+)', running_text)
+    if m:
+        data["Hostname"] = m.group(1).strip()
+
+    # IP gestión
+    m = re.search(r'interface\s+Vlan1.*?ip\s+address\s+(\S+)\s+(\S+)', running_text, re.DOTALL)
+    if not m:
+        m = re.search(r'ip\s+address\s+(\S+)\s+\S+', running_text)
+    if not m:
+        m = re.search(r'interface\s+vlan.*?ip\s+address\s+(\S+)', running_text, re.DOTALL | re.IGNORECASE)
+    if m:
+        data["IP-gestión"] = m.group(1).strip()
+
+    # Licencia
+    m = re.search(r'(License\s*[^:\n]*[:]\s*.+)', version_text, re.IGNORECASE)
+    if not m:
+        m = re.search(r'(image\s+license\s*[:-]\s*.+)', version_text, re.IGNORECASE)
+    if not m:
+        m = re.search(r'(Running\s+\w+\s+Image)', version_text, re.IGNORECASE)
+    if m:
+        data["Licencia"] = m.group(1).strip()
+    else:
+        data["Licencia"] = "N/A"
+
+    # Interfaces
+    interfaces = parse_interfaces(version_text)
+    if not interfaces:
+        int_running = re.findall(r'^interface\s+(FastEthernet|GigabitEthernet|TenGigabitEthernet|Port-Channel|Loopback)\S*', running_text, re.MULTILINE)
+        if int_running:
+            from collections import Counter
+            counts = Counter(int_running)
+            interfaces = ", ".join(f"{v} {k}" for k, v in counts.items())
+    data["Interfaces"] = interfaces
+
+    return data
+
+
+FIELDNAMES = [
+    "Tipo", "Marca", "Modelo", "Revisión", "Firmware", "Número de serie",
+    "Hostname", "MAC", "IP-gestión", "Licencia", "Interfaces"
+]
+
+
+def append_excel_row(data, filename):
+    if os.path.isfile(filename):
+        wb = load_workbook(filename)
+        ws = wb.active
+    else:
+        wb = Workbook()
+        ws = wb.active
+        ws.append(FIELDNAMES)
+        for col, ancho in zip('ABCDEFGHIJK', [12, 14, 20, 10, 16, 18, 16, 20, 18, 22, 30]):
+            ws.column_dimensions[col].width = ancho
+    ws.append([data.get(f, '') for f in FIELDNAMES])
+    wb.save(filename)
+
+
+def parse_port_status(output):
+    puertos = []
+    encabezado = True
+    for linea in output.strip().split('\n'):
+        linea = linea.strip()
+        if not linea or linea.startswith('--'):
+            continue
+        if encabezado:
+            if 'Port' in linea or 'Interface' in linea:
+                encabezado = False
+                continue
+        partes = linea.split()
+        if len(partes) >= 3:
+            nombre = partes[0]
+            if re.match(r'[A-Za-z]+[\d/]+', nombre):
+                estado = partes[2].lower()
+                puertos.append((nombre, estado))
+    return puertos
+
+
+def show_port_status(ser):
+    output = send_command(ser, "show interfaces status", wait=2)
+    if not output.strip():
+        output = send_command(ser, "show interfaces description", wait=2)
+    if not output.strip():
+        print("  No se pudo obtener el estado de los puertos.")
+        return []
+
+    puertos = parse_port_status(output)
+    if not puertos:
+        print("  No se encontraron puertos en la salida del comando.")
+        return []
+
+    total = len(puertos)
+    up = sum(1 for _, e in puertos if e == 'connected' or e == 'up')
+    down = sum(1 for _, e in puertos if e == 'notconnect' or e in ('down', 'disabled'))
+
+    print(f"\n{'='*60}")
+    print(f"  PUERTOS DEL SWITCH ({total} detectados)")
+    print(f"{'='*60}")
+    for nombre, estado in puertos:
+        icono = "🟢" if estado in ('connected', 'up') else "🔴"
+        print(f"  {icono} {nombre:12} {estado}")
+    print(f"{'='*60}")
+    print(f"  Total: {total}  |  Conectados: {up}  |  Desconectados: {total - up}")
+    print(f"{'='*60}")
+    return puertos
+
+
+def check_port_linked(ser, nombre, timeout=5):
+    inicio = time.time()
+    while time.time() - inicio < timeout:
+        output = send_command(ser, "show interfaces status", wait=0.5)
+        if not output.strip():
+            output = send_command(ser, "show interfaces description", wait=0.5)
+        for puerto, est in parse_port_status(output):
+            if puerto == nombre and est in ('connected', 'up'):
+                return True
+        time.sleep(1)
+    return False
+
+
+def interactive_port_test(ser, puertos):
+    down_ports = [p for p in puertos if p[1] not in ('connected', 'up')]
+    if not down_ports:
+        print("\n  Todos los puertos están conectados. No hay nada que testear.")
+        return
+
+    print(f"\n  {'='*60}")
+    print(f"  MODO TEST MANUAL")
+    print(f"  {'='*60}")
+    print(f"  Puertos a testear: {len(down_ports)}")
+    print(f"  Conecte un cable de red desde un equipo activo")
+    print(f"  al puerto indicado. El programa detectará cuando")
+    print(f"  el enlace se levante (timeout: 5s por puerto).")
+    print(f"  {'='*60}\n")
+
+    for i, (nombre, estado_actual) in enumerate(down_ports, 1):
+        print(f"  [{i}/{len(down_ports)}] Conecte un cable al puerto {nombre}")
+        input("  Presione Enter cuando esté listo...")
+
+        send_command(ser, "enable")
+        time.sleep(0.3)
+        read_all(ser)
+
+        transcurrido = time.time()
+        ok = check_port_linked(ser, nombre, timeout=5)
+        transcurrido = time.time() - transcurrido
+
+        if ok:
+            print(f"  ✅ Puerto {nombre} — CONECTADO ({transcurrido:.0f}s)")
+        else:
+            print(f"  ❌ Puerto {nombre} — SIN RESPUESTA (5s agotados)")
+
+    print(f"\n  {'='*60}")
+    print(f"  PRUEBA COMPLETADA")
+    print(f"  {'='*60}")
+
+
+def cmd_test_ports():
+    ser = open_serial()
+    if not ser:
+        return
+    logger.info("Iniciando test de puertos.")
+    try:
+        flush_serial(ser)
+        wake_up(ser)
+        send_command(ser, "enable")
+        time.sleep(0.5)
+        read_all(ser)
+
+        puertos = show_port_status(ser)
+        if not puertos:
+            ser.close()
+            return
+
+        op = input("\n  ¿Ejecutar test manual de puertos? (s/n): ").strip().lower()
+        if op == 's':
+            interactive_port_test(ser, puertos)
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+    finally:
+        ser.close()
+
+
+def show_serial_menu():
+    while True:
+        print("\n" + "-" * 35)
+        print("    CONFIGURACIÓN SERIAL")
+        print("-" * 35)
+        print(f"  Puerto:   {config.get('port', 'No seleccionado')}")
+        print(f"  Baudrate: {config.get('baudrate')}")
+        print(f"  Bits:     {config.get('bits')}")
+        print(f"  Paridad:  {config.get('parity')}")
+        print(f"  Stop bits:{config.get('stopbits')}")
+        print(f"  Timeout:  {config.get('timeout')}s")
+        print("-" * 35)
+        print("1. Listar puertos disponibles")
+        print("2. Seleccionar puerto")
+        print("3. Configurar baudrate")
+        print("4. Probar conexión")
+        print("0. Volver")
+        print("-" * 35)
+
+        choice = input("Opción: ").strip()
+
+        if choice == "1":
+            ports = list_available_ports()
+            if not ports:
+                print("No se encontraron puertos seriales.")
+            else:
+                for i, p in enumerate(ports, 1):
+                    print(f"  {i}. {p.device} - {p.description}")
+
+        elif choice == "2":
+            ports = list_available_ports()
+            if not ports:
+                print("No se encontraron puertos seriales.")
+                continue
+            print("Puertos disponibles:")
+            for i, p in enumerate(ports, 1):
+                print(f"  {i}. {p.device} - {p.description}")
+            try:
+                sel = int(input("Seleccione: ")) - 1
+                if 0 <= sel < len(ports):
+                    config["port"] = ports[sel].device
+                    save_config(config)
+                else:
+                    print("Selección inválida.")
+            except ValueError:
+                print("Entrada inválida.")
+
+        elif choice == "3":
+            try:
+                baud = int(input("Baudrate (ej: 9600, 19200, 115200): "))
+                config["baudrate"] = baud
+                save_config(config)
+            except ValueError:
+                print("Valor inválido.")
+
+        elif choice == "4":
+            if not config.get("port"):
+                print("No hay puerto seleccionado.")
+                continue
+            try:
+                ser = serial.Serial(
+                    port=config["port"],
+                    baudrate=config["baudrate"],
+                    bytesize=config["bits"],
+                    parity=config["parity"][0].upper() if config["parity"] else 'N',
+                    stopbits=config["stopbits"],
+                    timeout=config["timeout"]
+                )
+                print(f"Conexión exitosa a {config['port']}")
+                ser.close()
+            except serial.SerialException as e:
+                print(f"ERROR: {e}")
+
+        elif choice == "0":
+            break
+
+
+def main():
+    global config
+    config = load_config()
+
+    if not config.get("port"):
+        auto_detect_on_startup()
+
+    while True:
+        show_main_menu()
+        choice = input("Opción: ").strip()
+
+        if choice == "1":
+            cmd_connect()
+        elif choice == "2":
+            cmd_send_command()
+        elif choice == "3":
+            cmd_show_config()
+        elif choice == "4":
+            cmd_device_info()
+        elif choice == "5":
+            show_serial_menu()
+        elif choice == "6":
+            cmd_export_excel()
+        elif choice == "7":
+            cmd_factory_reset()
+        elif choice == "8":
+            cmd_test_ports()
+        elif choice == "0":
+            print("Saliendo...")
+            sys.exit(0)
+        else:
+            print("Opción inválida.")
+
+
+if __name__ == "__main__":
+    main()
