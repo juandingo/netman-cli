@@ -1,2 +1,62 @@
 pyserial>=3.5
 openpyxl>=3.0
+
+========================================
+          MENÚ PRINCIPAL
+========================================
+1. Conectar al dispositivo
+2. Enviar comando
+3. Ver configuración actual
+4. Información del dispositivo
+5. Configuración serial
+6. Exportar datos a Excel
+7. Reiniciar a fábrica
+8. Testear puertos del switch
+0. Salir
+========================================
+Opción: 4
+2026-06-09 20:40:13 [INFO] Obteniendo información del dispositivo...
+Obteniendo información del dispositivo...
+show version
+
+Cisco Adaptive Security Appliance Software Version 8.2(1)
+Device Manager Version 6.2(1)
+
+Compiled on Tue 05-May-09 22:45 by builders
+System image file is "disk0:/asa821-k8.bin"
+Config file at boot was "startup-config"
+
+ciscoasa up 39 mins 44 secs
+
+Hardware:   ASA5520, 2048 MB RAM, CPU Pentium 4 Celeron 2000 MHz
+Internal ATA Compact Flash, 256MB
+BIOS Flash Firmware Hub @ 0xffe00000, 1024KB
+
+Encryption hardware device : Cisco ASA-55x0 on-board accelerator (revision 0x0)
+                             Boot microcode   : ☻CN1000-MC-BOOT-2.00
+                             SSL/IKE microcode: ♥CNLite-MC-SSLm-PLUS-2.03
+                             IPSec microcode  : ☺CNlite-MC-IPSECm-MAIN-2.04
+ 0: Ext: GigabitEthernet0/0  : address is 0025.457a.2246, irq 9
+ 1: Ext: GigabitEthernet0/1  : address is 0025.457a.2247, irq 9
+ 2: Ext: GigabitEthernet0/2  : address is 0025.457a.2248, irq 9
+ 3: Ext: GigabitEthernet0/3  : address is 0025.457a.2249, irq 9
+ 4: Ext: Management0/0       : address is 0025.457a.224a, irq 11
+ 5: Int: Internal-Data0/0    : address is 0000.0001.0002, irq 11
+ 6: Int: Internal-Control0/0 : address is 0000.0001.0001, irq 5
+
+<--- More --->
+
+========================================
+          MENÚ PRINCIPAL
+========================================
+1. Conectar al dispositivo
+2. Enviar comando
+3. Ver configuración actual
+4. Información del dispositivo
+5. Configuración serial
+6. Exportar datos a Excel
+7. Reiniciar a fábrica
+8. Testear puertos del switch
+0. Salir
+========================================
+Opción:

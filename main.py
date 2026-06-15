@@ -86,6 +86,10 @@ def send_command(ser, command, wait=0.5, total_timeout=15):
             if data:
                 output += data
                 last_data_time = time.time()
+                decoded = output.decode(errors='replace')
+                if '<--- More --->' in decoded or '--More--' in decoded:
+                    ser.write(b' ')
+                    last_data_time = time.time()
             else:
                 if last_data_time is not None and time.time() - last_data_time > wait:
                     break
@@ -93,6 +97,13 @@ def send_command(ser, command, wait=0.5, total_timeout=15):
         pass
     ser.timeout = original_timeout
     return output.decode(errors='replace')
+
+
+def send_enable(ser):
+    out = send_command(ser, "enable")
+    if 'Password:' in out or 'password>' in out.lower():
+        send_command(ser, "")
+    return out
 
 
 def flush_serial(ser):
@@ -200,18 +211,19 @@ def cmd_show_config():
         return
     flush_serial(ser)
     wake_up(ser)
-    output = send_command(ser, "enable")
-    if '#' not in output:
+    out_enable = send_enable(ser)
+    if '#' not in out_enable:
         logger.warning("No se detecta modo privilegiado (enable). La configuración puede estar incompleta.")
         print("  AVISO: No se detecta modo privilegiado. Verifique que no haya password de enable.")
     send_command(ser, "terminal length 0")
+    send_command(ser, "pager lines 0")
     logger.info("Obteniendo running-config...")
     print("Obteniendo running-config...")
     output = send_command(ser, "show running-config", total_timeout=30)
     if output.strip():
         print(output)
     else:
-        print("  No se recibió respuesta. Verifique la conexión con el switch.")
+        print("  No se recibió respuesta. Verifique la conexión con el switch/firewall.")
         print("  Asegúrese de estar en modo privilegiado (enable).")
     ser.close()
 
@@ -222,16 +234,17 @@ def cmd_device_info():
         return
     flush_serial(ser)
     wake_up(ser)
-    send_command(ser, "enable")
+    send_enable(ser)
     send_command(ser, "terminal length 0")
+    send_command(ser, "pager lines 0")
     logger.info("Obteniendo información del dispositivo...")
     print("Obteniendo información del dispositivo...")
     output = send_command(ser, "show version", total_timeout=15)
     if output.strip():
         print(output)
     else:
-        print("  No se recibió respuesta. Verifique la conexión con el switch.")
-        print("  Asegúrese de que el switch esté encendido y conectado al puerto serial.")
+        print("  No se recibió respuesta. Verifique la conexión con el switch/firewall.")
+        print("  Asegúrese de que el dispositivo esté encendido y conectado al puerto serial.")
     ser.close()
 
 
@@ -253,7 +266,7 @@ def cmd_factory_reset():
                 ser.close()
                 return
 
-        send_command(ser, "enable")
+        send_enable(ser)
         time.sleep(0.5)
         read_all(ser)
 
@@ -335,8 +348,9 @@ def cmd_export_excel():
 
         logger.info("Conectando al switch para exportar datos...")
         print("Conectando al switch para obtener datos...")
-        send_command(ser, "enable")
+        send_enable(ser)
         send_command(ser, "terminal length 0")
+        send_command(ser, "pager lines 0")
 
         print("  Leyendo show version...")
         version_out = send_command(ser, "show version", total_timeout=15)
@@ -352,18 +366,46 @@ def cmd_export_excel():
         else:
             print("  AVISO: No se recibió respuesta.")
 
-        print("  Leyendo show vlan brief...")
-        vlan_out = send_command(ser, "show vlan brief", total_timeout=10)
-        if vlan_out.strip():
-            print("  OK")
-        else:
-            print("  AVISO: No se recibió respuesta.")
+        device_type = detect_device_type(version_out) if version_out.strip() else "Switch"
+        vlan_out = ""
+        ip_int_out = ""
+        serial_out = ""
+        if device_type == "Switch":
+            print("  Leyendo show vlan brief...")
+            vlan_out = send_command(ser, "show vlan brief", total_timeout=10)
+            if vlan_out.strip():
+                print("  OK")
+            else:
+                print("  AVISO: No se recibió respuesta.")
+        elif device_type == "Firewall":
+            print("  Leyendo show interface ip brief...")
+            ip_int_out = send_command(ser, "show interface ip brief", total_timeout=10)
+            if ip_int_out.strip():
+                print("  OK")
+            else:
+                print("  AVISO: No se pudo obtener interfaces IP.")
+            print("  Leyendo show serial...")
+            serial_out = send_command(ser, "show serial", total_timeout=10)
+            if serial_out.strip():
+                print("  OK")
+            else:
+                print("  AVISO: No se pudo obtener serial.")
 
         if not version_out.strip() and not running_out.strip():
-            print("\nERROR: No se pudo obtener datos del switch. Cancelando exportación.")
+            print(f"\nERROR: No se pudo obtener datos del {device_type.lower()}. Cancelando exportación.")
             return
 
-        data = parse_device_data(version_out, running_out, vlan_out)
+        data = parse_device_data(version_out, running_out, vlan_out, serial_out)
+
+        print("\n  Datos del dispositivo detectados. Complete los campos adicionales:")
+        username = input("  Username: ").strip()
+        data["Username"] = username
+        password = input("  Password: ").strip()
+        data["Password"] = password
+        estado = input("  Estado (default: Activo): ").strip()
+        data["Estado"] = estado if estado else "Activo"
+        observaciones = input("  Observaciones: ").strip()
+        data["Observaciones"] = observaciones
 
         filename = input("\nNombre archivo Excel (default: dispositivos.xlsx): ").strip()
         if not filename:
@@ -410,6 +452,12 @@ def detect_brand(version_text):
     return "Switch genérico"
 
 
+def detect_device_type(version_text):
+    if re.search(r'Adaptive Security Appliance|Security Appliance|PIX\s|ASA\s?\d+|Palo\s*Alto|PA-\s*\d+|FortiGate|Fortinet|pfSense|OPNsense|SonicWALL|SonicOS|Check\s*Point|Firewall\s+(Module|Appliance)', version_text, re.IGNORECASE):
+        return "Firewall"
+    return "Switch"
+
+
 def parse_interfaces(version_text):
     interfaces = []
     for m in re.finditer(r'(\d+)\s+(.+?)\s+[Ii]nterface', version_text):
@@ -422,12 +470,16 @@ def parse_interfaces(version_text):
             count, tipo = m.group(1), m.group(2)
             if tipo:
                 interfaces.append(f"{count} {tipo}")
+    if not interfaces:
+        ifaces = re.findall(r'\d+:\s+\w+:\s+(\S+)\s*:', version_text)
+        if ifaces:
+            interfaces = list(dict.fromkeys(ifaces))
     return ", ".join(interfaces) if interfaces else ""
 
 
-def parse_device_data(version_text, running_text, vlan_text=""):
+def parse_device_data(version_text, running_text, vlan_text="", serial_text=""):
     data = {
-        "Tipo": "Switch",
+        "Tipo": detect_device_type(version_text),
         "Marca": detect_brand(version_text),
         "Modelo": "",
         "Revisión": "",
@@ -436,8 +488,11 @@ def parse_device_data(version_text, running_text, vlan_text=""):
         "Hostname": "",
         "MAC": "",
         "IP-gestión": "",
+        "Username": "",
+        "Password": "",
         "Licencia": "",
-        "Interfaces": ""
+        "Estado": "",
+        "Observaciones": ""
     }
 
     # Modelo
@@ -450,6 +505,8 @@ def parse_device_data(version_text, running_text, vlan_text=""):
         m = re.search(r'[Pp]roduct\s+(?:name|number|model)\s*[=:]\s*(\S+)', version_text, re.IGNORECASE)
     if not m:
         m = re.search(r'[Mm]odel\s*(?:name|number|No\.?)?\s*[=:.]?\s*(\S+)', version_text)
+    if not m:
+        m = re.search(r'Hardware:\s*([^,\s]+)', version_text)
     if m:
         data["Modelo"] = m.group(1).strip().rstrip(',')
 
@@ -459,6 +516,10 @@ def parse_device_data(version_text, running_text, vlan_text=""):
         data["Revisión"] = m.group(1).strip()
     else:
         m = re.search(r'[Mm]odel\s+rev\S*\s*[=:.]?\s*(\S+)', version_text)
+        if m:
+            data["Revisión"] = m.group(1).strip()
+    if not data["Revisión"]:
+        m = re.search(r'\(revision\s+(\S+)\)', version_text, re.IGNORECASE)
         if m:
             data["Revisión"] = m.group(1).strip()
 
@@ -490,6 +551,14 @@ def parse_device_data(version_text, running_text, vlan_text=""):
         m = re.search(r'[Ss][Nn][:=]\s*(\S+)', version_text)
         if m:
             data["Número de serie"] = m.group(1).strip()
+    if not data["Número de serie"]:
+        m = re.search(r'[Ss]erial\s+[Nn]umber\s*:?\s*(\S+)', version_text)
+        if m:
+            data["Número de serie"] = m.group(1).strip()
+    if not data["Número de serie"] and serial_text:
+        m = re.search(r'(\S+)', serial_text)
+        if m:
+            data["Número de serie"] = m.group(1).strip()
 
     # MAC
     m = re.search(r'(?:Base\s+)?(?:ethernet\s+)?MAC\s+(?:Address|Router)\s*[=:]\s*(\S+)', version_text, re.IGNORECASE)
@@ -502,6 +571,8 @@ def parse_device_data(version_text, running_text, vlan_text=""):
 
     # Hostname
     m = re.search(r'hostname\s+(\S+)', running_text)
+    if not m and version_text:
+        m = re.search(r'^(\S+)\s+up\s+\d+\s+(sec|min|hour|day|week)', version_text, re.MULTILINE)
     if m:
         data["Hostname"] = m.group(1).strip()
 
@@ -539,8 +610,9 @@ def parse_device_data(version_text, running_text, vlan_text=""):
 
 
 FIELDNAMES = [
-    "Tipo", "Marca", "Modelo", "Revisión", "Firmware", "Número de serie",
-    "Hostname", "MAC", "IP-gestión", "Licencia", "Interfaces"
+    "ID", "Tipo", "Marca", "Modelo", "Firmware", "Número de serie",
+    "Hostname", "MAC", "IP-gestión", "Username", "Password",
+    "Licencia", "Estado", "Observaciones"
 ]
 
 
@@ -548,13 +620,23 @@ def append_excel_row(data, filename):
     if os.path.isfile(filename):
         wb = load_workbook(filename)
         ws = wb.active
+        max_id = 0
+        for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+            if row[0] is not None:
+                try:
+                    max_id = max(max_id, int(row[0]))
+                except (ValueError, TypeError):
+                    pass
+        row_id = max_id + 1
     else:
         wb = Workbook()
         ws = wb.active
         ws.append(FIELDNAMES)
-        for col, ancho in zip('ABCDEFGHIJK', [12, 14, 20, 10, 16, 18, 16, 20, 18, 22, 30]):
+        for col, ancho in zip('ABCDEFGHIJKLMN', [6, 10, 14, 20, 16, 18, 16, 20, 18, 14, 14, 22, 12, 30]):
             ws.column_dimensions[col].width = ancho
-    ws.append([data.get(f, '') for f in FIELDNAMES])
+        row_id = 1
+    row_data = [row_id] + [data.get(f, '') for f in FIELDNAMES[1:]]
+    ws.append(row_data)
     wb.save(filename)
 
 
@@ -639,7 +721,7 @@ def interactive_port_test(ser, puertos):
         print(f"  [{i}/{len(down_ports)}] Conecte un cable al puerto {nombre}")
         input("  Presione Enter cuando esté listo...")
 
-        send_command(ser, "enable")
+        send_enable(ser)
         time.sleep(0.3)
         read_all(ser)
 
@@ -665,7 +747,7 @@ def cmd_test_ports():
     try:
         flush_serial(ser)
         wake_up(ser)
-        send_command(ser, "enable")
+        send_enable(ser)
         time.sleep(0.5)
         read_all(ser)
 

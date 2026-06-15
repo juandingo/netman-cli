@@ -4,7 +4,7 @@ Herramienta CLI para administración de equipos de red (switches, routers, firew
 
 ## Características actuales
 
-- Conexión serial a switches (Cisco, HP, Dell, Juniper, etc.)
+- Conexión serial a switches (Cisco, HP, Dell, Juniper, etc.) y firewalls.
 - Auto-detección de puertos disponibles
 - Envío interactivo de comandos
 - Obtención de `show version`, `show running-config`
@@ -40,7 +40,7 @@ Al ejecutar, el menú principal ofrece:
 
 ## Roadmap / A futuro
 
-- [ ] Soporte para routers y firewalls
+- [ ] Soporte para routers
 - [ ] Conexión vía SSH y Telnet
 - [ ] Backup automatizado de configuraciones
 - [ ] Soporte para más marcas y sistemas operativos de red
