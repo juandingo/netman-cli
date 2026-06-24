@@ -4,7 +4,7 @@ Herramienta CLI para administración de equipos de red (switches, routers, firew
 
 ## Características actuales
 
-- Conexión serial a switches (Cisco, HP, Dell, Juniper, etc.) y firewalls.
+- Conexión serial a switches (Cisco, HP, Dell, Allied Telesis, etc.) y firewalls.
 - Auto-detección de puertos disponibles
 - Envío interactivo de comandos
 - Obtención de `show version`, `show running-config`
@@ -37,11 +37,9 @@ Al ejecutar, el menú principal ofrece:
 6. Exportar datos a Excel
 7. Reinicio a fábrica
 8. Testear puertos del switch
+9. Obtener información del Allied Telesis
 
 ## Roadmap / A futuro
 
-- [ ] Soporte para routers
-- [ ] Conexión vía SSH y Telnet
-- [ ] Backup automatizado de configuraciones
 - [ ] Soporte para más marcas y sistemas operativos de red
 - [ ] Mejorar el menú principal (navegación, submenús, atajos)

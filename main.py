@@ -150,6 +150,7 @@ def show_main_menu():
     print("6. Exportar datos a Excel")
     print("7. Reiniciar a fábrica")
     print("8. Testear puertos del switch")
+    print("9. Obtener info Allied Telesis FS750")
     print("0. Salir")
     print("=" * 40)
 
@@ -609,9 +610,60 @@ def parse_device_data(version_text, running_text, vlan_text="", serial_text=""):
     return data
 
 
+def parse_allied_telesis(output):
+    data = {
+        "Tipo": "Switch",
+        "Marca": "Allied Telesis",
+        "Modelo": "",
+        "Puertos": "",
+        "Firmware": "",
+        "Boot Loader": "",
+        "Número de serie": "",
+        "Hostname": "",
+        "MAC": "",
+        "IP-gestión": "",
+        "Username": "manager",
+        "Password": "friend",
+        "Licencia": "N/A",
+        "Estado": "",
+        "Observaciones": ""
+    }
+
+    m = re.search(r'(AT-FS\S+)', output)
+    if m:
+        data["Modelo"] = m.group(1)
+
+    m = re.search(r'Runtime Image\s*:\s*Version\s+(.+)', output)
+    if m:
+        data["Firmware"] = m.group(1).strip()
+
+    m = re.search(r'Boot Loader\s*:\s*Version\s+(.+)', output)
+    if m:
+        data["Boot Loader"] = m.group(1).strip()
+
+    m = re.search(r'Switch Name\s*:\s*(.*)', output)
+    if m:
+        data["Hostname"] = m.group(1).strip()
+
+    m = re.search(r'MAC Address\s*:\s*(\S+)', output)
+    if m:
+        data["MAC"] = m.group(1)
+
+    m = re.search(r'IP Address\s*:\s*(\S+)', output)
+    if m:
+        data["IP-gestión"] = m.group(1)
+
+    if data["Modelo"]:
+        m = re.search(r'/(\d+)', data["Modelo"])
+        if m:
+            data["Puertos"] = m.group(1)
+
+    return data
+
+
 FIELDNAMES = [
-    "ID", "Tipo", "Marca", "Modelo", "Firmware", "Número de serie",
-    "Hostname", "MAC", "IP-gestión", "Username", "Password",
+    "ID", "Tipo", "Marca", "Modelo", "Puertos", "Firmware", "Boot Loader",
+    "Número de serie", "Hostname", "MAC", "IP-gestión", "Username", "Password",
     "Licencia", "Estado", "Observaciones"
 ]
 
@@ -632,7 +684,7 @@ def append_excel_row(data, filename):
         wb = Workbook()
         ws = wb.active
         ws.append(FIELDNAMES)
-        for col, ancho in zip('ABCDEFGHIJKLMN', [6, 10, 14, 20, 16, 18, 16, 20, 18, 14, 14, 22, 12, 30]):
+        for col, ancho in zip('ABCDEFGHIJKLMNOP', [6, 10, 14, 20, 8, 16, 16, 18, 16, 20, 18, 14, 14, 22, 12, 30]):
             ws.column_dimensions[col].width = ancho
         row_id = 1
     row_data = [row_id] + [data.get(f, '') for f in FIELDNAMES[1:]]
@@ -766,6 +818,128 @@ def cmd_test_ports():
         ser.close()
 
 
+def read_until(ser, target, timeout=15):
+    output = ""
+    original_timeout = ser.timeout
+    ser.timeout = 0.2
+    deadline = time.time() + timeout
+    last_data_time = time.time()
+    try:
+        while time.time() < deadline:
+            try:
+                data = ser.read(ser.in_waiting or 1)
+            except:
+                break
+            if data:
+                output += data.decode(errors='replace')
+                last_data_time = time.time()
+                if target in output:
+                    return output
+            else:
+                if time.time() - last_data_time > 2:
+                    break
+    finally:
+        ser.timeout = original_timeout
+    return output
+
+
+def detect_allied_telesis_state(output):
+    if "Login:" in output or "login:" in output:
+        return "login"
+    if "Main Menu" in output and "Command>" in output:
+        return "menu"
+    if "General Information" in output:
+        return "info"
+    return "unknown"
+
+
+def cmd_allied_telesis():
+    ser = open_serial()
+    if not ser:
+        return
+
+    try:
+        flush_serial(ser)
+        ser.reset_input_buffer()
+
+        print("  Conectando al Allied Telesis FS750...")
+
+        ser.write(b'\r')
+        time.sleep(0.5)
+        output = read_all(ser, timeout=3)
+
+        if not output.strip():
+            ser.write(b'\r')
+            time.sleep(0.5)
+            output = read_all(ser, timeout=3)
+
+        state = detect_allied_telesis_state(output)
+
+        if state == "login":
+            print("  Login detectado. Enviando credenciales manager/friend...")
+            send_command(ser, "manager", wait=0.5, total_timeout=5)
+            time.sleep(0.3)
+            output = send_command(ser, "friend", wait=1.5, total_timeout=10)
+            if 'Main Menu' not in output and 'Command>' not in output:
+                print("  Error: No se pudo iniciar sesión.")
+                print(output[-400:])
+                return
+            print("  Sesión iniciada correctamente.")
+        elif state == "menu":
+            print("  Ya en el menú principal. Saltando login...")
+        elif state == "info":
+            print("  Ya en General Information. Parseando directamente...")
+            data = parse_allied_telesis(output)
+            print(output)
+        else:
+            print("  No se reconoce el estado del switch.")
+            print(output[-500:])
+            return
+
+        if state != "info":
+            ser.reset_input_buffer()
+            time.sleep(0.3)
+            print("  Obteniendo General Information...")
+            output = send_command(ser, "G", wait=2, total_timeout=15)
+            if not output.strip():
+                print("  AVISO: No se recibió respuesta para General Information.")
+                return
+            print(output)
+            data = parse_allied_telesis(output)
+
+        print("\n  Datos detectados del Allied Telesis:")
+        for k, v in data.items():
+            if v:
+                print(f"    {k}: {v}")
+            else:
+                print(f"    {k}: (no detectado)")
+
+        print("\n  Complete los campos adicionales:")
+        serial_num = input("  Número de serie (deje vacío si no disponible): ").strip()
+        if serial_num:
+            data["Número de serie"] = serial_num
+        estado = input("  Estado (default: Activo): ").strip()
+        data["Estado"] = estado if estado else "Activo"
+        observaciones = input("  Observaciones: ").strip()
+        data["Observaciones"] = observaciones
+
+        filename = input("\n  Nombre archivo Excel (default: dispositivos.xlsx): ").strip()
+        if not filename:
+            filename = "dispositivos.xlsx"
+        if not filename.endswith('.xlsx'):
+            filename += '.xlsx'
+
+        append_excel_row(data, filename)
+        logger.info(f"Datos exportados a: {filename}")
+        print(f"\n  Datos exportados a: {filename}")
+
+    except Exception as e:
+        logger.error(f"Error en Allied Telesis: {e}")
+        print(f"ERROR: {e}")
+    finally:
+        ser.close()
+
+
 def show_serial_menu():
     while True:
         print("\n" + "-" * 35)
@@ -870,6 +1044,8 @@ def main():
             cmd_factory_reset()
         elif choice == "8":
             cmd_test_ports()
+        elif choice == "9":
+            cmd_allied_telesis()
         elif choice == "0":
             print("Saliendo...")
             sys.exit(0)
